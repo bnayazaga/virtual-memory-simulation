@@ -1,6 +1,6 @@
 #include "VirtualMemory.h"
 #include "PhysicalMemory.h"
-#include <cmath>
+
 
 #define SUCCESS 1
 #define FAILURE 0
@@ -8,20 +8,23 @@
 typedef struct dfs_attributes{
     word_t maxFrame;
     uint64_t maxDistance;
-    word_t parent_table;
+    word_t parentTable;
     word_t offset;
     word_t cyclicFrame;
-    uint64_t page_address;
+    uint64_t pageAddress;
     uint64_t cyclicPage;
 }dfs_attributes;
 
-
-uint64_t extractBits(uint64_t number, uint64_t from, uint64_t to) {
-  uint64_t mask = ((1LL << ((to-from))) - 1LL) << from;
-  return (number & mask) >> from;
+// extract the part of the binary number from start (inclusive) to end (exclusive)
+uint64_t extractBits(const uint64_t number, const uint64_t start, const uint64_t end) {
+  if (start >= end || end > 64) {
+    return 0;
+  }
+  const uint64_t mask = ((1LL << (end - start)) - 1) << start;
+  return (number & mask) >> start;
 }
 
-bool not_occupied(int* occupied, int frame){
+bool not_occupied(const int* occupied, const int frame){
   for (int i = 0; i < TABLES_DEPTH; ++i)
   {
     if (occupied[i] == frame)
@@ -42,11 +45,10 @@ void make_occupied(int* occupied, int frame){
   }
 }
 
-uint64_t min_cyclic(uint64_t page_swapped_in, uint64_t p){
-  uint64_t x = NUM_PAGES - abs (page_swapped_in-p);
-  uint64_t y = abs (page_swapped_in-p);
-  uint64_t z = x < y ? x : y;
-  return z;
+uint64_t min_cyclic(const uint64_t page_swapped_in, const uint64_t p){
+  const uint64_t distance = page_swapped_in > p ? page_swapped_in - p : p - page_swapped_in;
+  const uint64_t cyclic_distance = NUM_PAGES - distance;
+  return cyclic_distance < distance ? cyclic_distance : distance;
 }
 
 uint64_t modifyPageAddress(dfs_attributes* attributes, int i,
@@ -56,7 +58,7 @@ uint64_t modifyPageAddress(dfs_attributes* attributes, int i,
   {
     uint64_t x = extractBits (i, j, j+1);
     sum += x * maxValue;
-    attributes->page_address += x * maxValue;
+    attributes->pageAddress += x * maxValue;
     maxValue /= (1LL << 1);
     if (j == 0){
       return sum;
@@ -80,16 +82,16 @@ page_swapped_in, dfs_attributes *attributes, uint64_t* maxValue, uint64_t
       {
        uint64_t sum = modifyPageAddress (attributes, i, maxValue[layer],
                                          layerSize[layer]);
-        uint64_t x = min_cyclic (page_swapped_in, attributes->page_address);
+        uint64_t x = min_cyclic (page_swapped_in, attributes->pageAddress);
         if (x > attributes->maxDistance)
         {
           attributes->maxDistance = x;
           attributes->cyclicFrame = *value;
-          attributes->parent_table = cur_frame;
+          attributes->parentTable = cur_frame;
           attributes->offset = i;
-          attributes->cyclicPage = attributes->page_address;
+          attributes->cyclicPage = attributes->pageAddress;
         }
-        attributes->page_address -= sum;
+        attributes->pageAddress -= sum;
       }
     }
   }
@@ -109,7 +111,7 @@ page_swapped_in, dfs_attributes *attributes, uint64_t* maxValue, uint64_t
     }
     dfs (layer + 1, value, *value, page_swapped_in, attributes, maxValue, 
          layerSize);
-    attributes->page_address -= sum;
+    attributes->pageAddress -= sum;
   }
 }
 
@@ -178,26 +180,26 @@ word_t findEmptyFrame(int *occupied, uint64_t page_swapped_in, uint64_t
     return attributes.maxFrame+1;
   }
   PMevict (attributes.cyclicFrame, attributes.cyclicPage);
-  PMwrite ((attributes.parent_table * PAGE_SIZE) + attributes.offset, 0);
+  PMwrite ((attributes.parentTable * PAGE_SIZE) + attributes.offset, 0);
   make_occupied (occupied, attributes.cyclicFrame);
   return attributes.cyclicFrame;
 }
 
-
-void determine_layer_size (uint64_t address, uint64_t *sizes_array)
+// determine the size of the layers, give each the base and the extra to the first layers
+void determineLayerSize (const uint64_t address, uint64_t *sizes_array)
 {
-  uint64_t mod = address % TABLES_DEPTH;
-  for (int i = 0; i < TABLES_DEPTH; ++i)
+  const uint64_t extra = address % TABLES_DEPTH;
+  const uint64_t base = address / TABLES_DEPTH;
+  for (unsigned int i = 0; i < TABLES_DEPTH; ++i)
   {
-    sizes_array[i] = address / TABLES_DEPTH;
-    if (mod>0){
+    sizes_array[i] = base;
+    if (i < extra){
       sizes_array[i]++;
-      mod--;
     }
   }
 }
 
-uint64_t determine_address (int layer, uint64_t *layerSize, uint64_t address)
+uint64_t determineAddress (int layer, const uint64_t *layerSize, uint64_t address)
 {
   uint64_t sum = 0;
   for (int i = 0; i <= layer; ++i)
@@ -225,19 +227,20 @@ void determineMaxValue (uint64_t *maxValue, const uint64_t *layerSize)
   }
 }
 
-word_t findFrame(uint64_t virtualAddress){
+// translate virtual address to physical address, find the correct frame and manage page faults
+uint64_t findPhysicalAddress(uint64_t virtualAddress){
   uint64_t address = extractBits (virtualAddress, OFFSET_WIDTH,
                                   VIRTUAL_ADDRESS_WIDTH);
   uint64_t layerSize[TABLES_DEPTH];
-  determine_layer_size(VIRTUAL_ADDRESS_WIDTH-OFFSET_WIDTH, layerSize);
+  determineLayerSize(VIRTUAL_ADDRESS_WIDTH-OFFSET_WIDTH, layerSize);
   uint64_t maxValue[TABLES_DEPTH];
   determineMaxValue(maxValue, layerSize);
   word_t curValue;
   word_t occupied[TABLES_DEPTH] = {0};
-  word_t i = 0;
+  uint64_t i = 0;
   for (int layer = 0; layer < TABLES_DEPTH; ++layer)
   {
-    uint64_t curAddress = determine_address(layer, layerSize, virtualAddress);
+    uint64_t curAddress = determineAddress(layer, layerSize, virtualAddress);
 //    std::cout << "cur address: " << curAddress << std::endl;
     PMread (i+curAddress, &curValue);
     if (curValue == 0){
@@ -261,9 +264,10 @@ word_t findFrame(uint64_t virtualAddress){
   return offset + i;
 }
 
+// check validity of virtual address and pointer
 int checkValidity (uint64_t virtualAddress, const word_t *value)
 {
-  if (virtualAddress > VIRTUAL_MEMORY_SIZE || value == nullptr){
+  if (virtualAddress >= VIRTUAL_MEMORY_SIZE || value == nullptr){
     return FAILURE;
   }
   return SUCCESS;
@@ -282,8 +286,8 @@ int VMread(uint64_t virtualAddress, word_t* value){
   if (checkValidity (virtualAddress, value) == 0){
     return FAILURE;
   }
-  word_t frame = findFrame (virtualAddress);
-  PMread (frame, value);
+  const uint64_t physicalAddress = findPhysicalAddress (virtualAddress);
+  PMread (physicalAddress, value);
   return SUCCESS;
 }
 
@@ -292,8 +296,8 @@ int VMwrite(uint64_t virtualAddress, word_t value){
   if (checkValidity (virtualAddress, &value) == 0){
     return FAILURE;
   }
-  word_t frame = findFrame (virtualAddress);
-  PMwrite(frame, value);
+  const uint64_t physicalAddress = findPhysicalAddress (virtualAddress);
+  PMwrite(physicalAddress, value);
   return SUCCESS;
 }
 //
