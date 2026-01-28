@@ -16,3 +16,36 @@ This project implements:
 **Key concepts**: Virtual-to-physical address translation, hierarchical page tables, page fault handling
 
 **Note**: C-style implementation in C++ (per OS course requirements)
+
+---
+
+## How to Use
+
+### Compilation
+```bash
+g++ -std=c++11 -Wall -Wextra VirtualMemory.cpp PhysicalMemory.cpp -o vm_simulation
+```
+
+### API
+
+#### Initialize the system
+```c
+#include "VirtualMemory.h"
+
+VMinitialize();  // Must be called before any read/write operations
+```
+
+#### Write to virtual memory
+```c
+word_t value = 42;
+int result = VMwrite(0x12345, value);  // Returns 1 on success, 0 on failure
+```
+
+#### Read from virtual memory
+```c
+word_t value;
+int result = VMread(0x12345, &value);  // Returns 1 on success, 0 on failure
+// value now contains 42
+```
+
+There are test files in the tests folder, that were provided by the course staff
