@@ -5,15 +5,23 @@
 #define SUCCESS 1
 #define FAILURE 0
 
+/**
+ * Struct to track state during DFS frame search
+ * Used by the eviction algorithm to find optimal page to evict
+ */
 typedef struct dfs_attributes{
-    word_t maxFrame;
-    uint64_t maxDistance;
-    word_t parentTable;
-    word_t offset;
-    word_t cyclicFrame;
-    uint64_t pageAddress;
-    uint64_t cyclicPage;
+  word_t maxFrame;           // Highest frame number seen
+  uint64_t maxDistance;      // Max cyclic distance found
+  word_t parentTable;        // Parent of eviction candidate
+  word_t offset;             // Offset in parent table
+  word_t cyclicFrame;        // Frame to evict
+  uint64_t pageAddress;      // Current page being examined
+  uint64_t cyclicPage;       // Page number to evict
 }dfs_attributes;
+
+// ============================================================================
+// INTERNAL FUNCTIONS
+// ============================================================================
 
 // extract the part of the binary number from start (inclusive) to end (exclusive)
 uint64_t extractBits(const uint64_t number, const uint64_t start, const uint64_t end) {
@@ -24,7 +32,8 @@ uint64_t extractBits(const uint64_t number, const uint64_t start, const uint64_t
   return (number & mask) >> start;
 }
 
-bool not_occupied(const int* occupied, const int frame){
+// Check if frame is not in the current traversal path
+bool notOccupied(const int* occupied, const int frame){
   for (int i = 0; i < TABLES_DEPTH; ++i)
   {
     if (occupied[i] == frame)
@@ -35,7 +44,8 @@ bool not_occupied(const int* occupied, const int frame){
   return true;
 }
 
-void make_occupied(int* occupied, int frame){
+// Mark frame as occupied
+void makeOccupied(int* occupied, int frame){
   for (int i = 0; i < TABLES_DEPTH; ++i)
   {
     if (occupied[i] == 0){
@@ -45,12 +55,14 @@ void make_occupied(int* occupied, int frame){
   }
 }
 
-uint64_t min_cyclic(const uint64_t page_swapped_in, const uint64_t p){
+// Calculate minimum cyclic distance between two pages
+uint64_t minCyclic(const uint64_t page_swapped_in, const uint64_t p){
   const uint64_t distance = page_swapped_in > p ? page_swapped_in - p : p - page_swapped_in;
   const uint64_t cyclic_distance = NUM_PAGES - distance;
   return cyclic_distance < distance ? cyclic_distance : distance;
 }
 
+// Update page address during DFS traversal
 uint64_t modifyPageAddress(dfs_attributes* attributes, int i,
                        uint64_t maxValue, uint64_t layerSize){
   uint64_t sum = 0;
@@ -66,6 +78,10 @@ uint64_t modifyPageAddress(dfs_attributes* attributes, int i,
   }
 }
 
+/**
+ * DFS to find page with maximum cyclic distance for eviction.
+ * Also tracks the maximum frame number encountered.
+ */
 void dfs (int layer, word_t *value, word_t cur_frame, uint64_t
 page_swapped_in, dfs_attributes *attributes, uint64_t* maxValue, uint64_t 
 *layerSize)
@@ -82,7 +98,7 @@ page_swapped_in, dfs_attributes *attributes, uint64_t* maxValue, uint64_t
       {
        uint64_t sum = modifyPageAddress (attributes, i, maxValue[layer],
                                          layerSize[layer]);
-        uint64_t x = min_cyclic (page_swapped_in, attributes->pageAddress);
+        uint64_t x = minCyclic (page_swapped_in, attributes->pageAddress);
         if (x > attributes->maxDistance)
         {
           attributes->maxDistance = x;
@@ -98,7 +114,6 @@ page_swapped_in, dfs_attributes *attributes, uint64_t* maxValue, uint64_t
   for (int i = 0; i < PAGE_SIZE; ++i)
   {
     PMread ((cur_frame * PAGE_SIZE) + i, value);
-//    std::cout << "cur frame: " << cur_frame << std::endl;
     if (*value == 0)
     {
       continue;
@@ -115,6 +130,10 @@ page_swapped_in, dfs_attributes *attributes, uint64_t* maxValue, uint64_t
   }
 }
 
+/**
+ * Search for completely empty page table to reuse.
+ * Returns frame number if found, 0 otherwise.
+ */
 word_t findEmptyTable (int layer, word_t *value, int cur_frame, int
                           *child_changed, int *occupied)
 {
@@ -122,7 +141,7 @@ word_t findEmptyTable (int layer, word_t *value, int cur_frame, int
   {
     return 0;
   }
-  if (not_occupied (occupied, cur_frame))
+  if (notOccupied (occupied, cur_frame))
   {
     int zero_entries_in_table = 0;
     for (int i = 0; i < PAGE_SIZE; ++i)
@@ -161,31 +180,36 @@ word_t findEmptyTable (int layer, word_t *value, int cur_frame, int
   return 0;
 }
 
-
+/**
+ * Find available frame using three-tier strategy:
+ * 1. Search for empty table to reuse
+ * 2. Allocate new unused frame if available
+ * 3. Evict page with maximum cyclic distance
+ */
 word_t findEmptyFrame(int *occupied, uint64_t page_swapped_in, uint64_t 
                       *maxValue, uint64_t *layerSize){
   word_t value;
   int child_changed = 0;
   word_t frame = findEmptyTable (0, &value, 0, &child_changed, occupied);
   if (frame != 0){
-    make_occupied (occupied, frame);
+    makeOccupied (occupied, frame);
     return frame;
   }
   dfs_attributes attributes = {0};
   dfs (0, &value, 0, page_swapped_in, &attributes, maxValue, layerSize);
-  if (attributes.maxFrame+1 < NUM_FRAMES && not_occupied (occupied,
+  if (attributes.maxFrame+1 < NUM_FRAMES && notOccupied (occupied,
                                                           attributes
                                                           .maxFrame+1)){
-    make_occupied (occupied, attributes.maxFrame+1);
+    makeOccupied (occupied, attributes.maxFrame+1);
     return attributes.maxFrame+1;
   }
   PMevict (attributes.cyclicFrame, attributes.cyclicPage);
   PMwrite ((attributes.parentTable * PAGE_SIZE) + attributes.offset, 0);
-  make_occupied (occupied, attributes.cyclicFrame);
+  makeOccupied (occupied, attributes.cyclicFrame);
   return attributes.cyclicFrame;
 }
 
-// determine the size of the layers, give each the base and the extra to the first layers
+// Distribute address bits evenly across page table layers
 void determineLayerSize (const uint64_t address, uint64_t *sizes_array)
 {
   const uint64_t extra = address % TABLES_DEPTH;
@@ -199,6 +223,7 @@ void determineLayerSize (const uint64_t address, uint64_t *sizes_array)
   }
 }
 
+// Extract index for specific layer from virtual address
 uint64_t determineAddress (int layer, const uint64_t *layerSize, uint64_t address)
 {
   uint64_t sum = 0;
@@ -214,6 +239,7 @@ uint64_t determineAddress (int layer, const uint64_t *layerSize, uint64_t addres
                       (VIRTUAL_ADDRESS_WIDTH - sum) + layerSize[layer]);
 }
 
+// Calculate maximum contribution value for each layer
 void determineMaxValue (uint64_t *maxValue, const uint64_t *layerSize)
 {
   for (int i = 0; i < TABLES_DEPTH; ++i)
@@ -229,6 +255,7 @@ void determineMaxValue (uint64_t *maxValue, const uint64_t *layerSize)
 
 // translate virtual address to physical address, find the correct frame and manage page faults
 uint64_t findPhysicalAddress(uint64_t virtualAddress){
+  // Extract page number (remove offset)
   uint64_t address = extractBits (virtualAddress, OFFSET_WIDTH,
                                   VIRTUAL_ADDRESS_WIDTH);
   uint64_t layerSize[TABLES_DEPTH];
@@ -241,18 +268,19 @@ uint64_t findPhysicalAddress(uint64_t virtualAddress){
   for (int layer = 0; layer < TABLES_DEPTH; ++layer)
   {
     uint64_t curAddress = determineAddress(layer, layerSize, virtualAddress);
-//    std::cout << "cur address: " << curAddress << std::endl;
     PMread (i+curAddress, &curValue);
     if (curValue == 0){
       word_t frame = findEmptyFrame(occupied, address, maxValue, layerSize);
       if (layer < TABLES_DEPTH-1)
       {
+        // Initialize new page table
         for (int j = 0; j < PAGE_SIZE; ++j)
         {
           PMwrite ((frame * PAGE_SIZE) + j, 0);
         }
       }
       else {
+        // Restore page from disk
         PMrestore (frame, address);
       }
       PMwrite (i+curAddress, frame);
@@ -273,7 +301,13 @@ int checkValidity (uint64_t virtualAddress, const word_t *value)
   return SUCCESS;
 }
 
+// ============================================================================
+// PUBLIC API
+// ============================================================================
 
+/** Initialize the virtual memory by clearing root page table.
+ * Must be called before any VMread or VMwrite operations.
+ */
 void VMinitialize(){
   for (int i = 0; i < PAGE_SIZE; ++i)
   {
@@ -281,7 +315,11 @@ void VMinitialize(){
   }
 }
 
-
+/** reads a word from the given virtual address
+ * and puts its content in value.
+ * @return 1 on success and 0 on failure (if the address cannot be mapped to a physical
+ * address for any reason)
+ */
 int VMread(uint64_t virtualAddress, word_t* value){
   if (checkValidity (virtualAddress, value) == 0){
     return FAILURE;
@@ -291,7 +329,10 @@ int VMread(uint64_t virtualAddress, word_t* value){
   return SUCCESS;
 }
 
-
+/** writes a word to the given virtual address
+ * @return 1 on success and 0 on failure (if the address cannot be mapped to a physical
+ * address for any reason)
+ */
 int VMwrite(uint64_t virtualAddress, word_t value){
   if (checkValidity (virtualAddress, &value) == 0){
     return FAILURE;
@@ -300,12 +341,4 @@ int VMwrite(uint64_t virtualAddress, word_t value){
   PMwrite(physicalAddress, value);
   return SUCCESS;
 }
-//
-//int main(int argc, char** argv){
-//  dfs_attributes attributes = {0};
-//  int layer = 0;
-//  uint64_t layerSize = 3;
-//  uint64_t maxValue = 1LL << 3;
-//  uint64_t x = modifyPageAddress (&attributes, 5, maxValue, layerSize);
-//  std::cout << x << std::endl << attributes.page_address;
-//}
+
